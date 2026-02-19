@@ -1,159 +1,165 @@
+# predict.py
+# Evaluation script for Dual-Stream CNN nucleosome positioning model
+
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import pickle
 import math
-import numpy as np
-from matplotlib import pyplot as plt
-import evaluator
-from sklearn.metrics import roc_curve, auc, accuracy_score, precision_score, confusion_matrix
-from sklearn.metrics import roc_auc_score, f1_score
+import csv
 import argparse
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+from matplotlib import pyplot as plt
+
+from sklearn.metrics import (
+    roc_curve, roc_auc_score,
+    accuracy_score, precision_score,
+    f1_score, confusion_matrix,
+)
 from tensorflow.keras.models import load_model
 
+import evaluator
+from model_npcdn import DualStreamCNN
 
-parser = argparse.ArgumentParser(description='Nucleosome Classification Experiment')
-parser.add_argument('-pn', '--plot', dest='plotName', type=str, default="0",
-                    help='Plot Title')
-parser.add_argument('-p','--path', dest='path', type=str, default=r"D:\DeepNup\best_result_setting1",
-                    help='Model file Path')
-parser.add_argument('-e', '--experiments', dest='exp', default=r'Experiment_H',
-                    help='Experiments Name')
-parser.add_argument('-f', '-foldName', dest='foldName', default="folds.pickle",
-                    help='Folds Filename')
-
+# ── CLI args ──────────────────────────────────────────────────────────────────
+parser = argparse.ArgumentParser(description="Dual-Stream CNN Evaluation")
+parser.add_argument("-pn", "--plot",  dest="plotName", type=str, default="DualStream-CNN")
+parser.add_argument("-p",  "--path",  dest="path",     type=str, default="result")
+parser.add_argument("-e",  "--experiments", dest="exp", default="Experiment_melanogaster")
+parser.add_argument("-f",  "--foldName",    dest="foldName", default="folds.pickle")
 args = parser.parse_args()
-inPath = args.path
-expName = args.exp
+
+inPath   = args.path
+expName  = args.exp
 foldName = args.foldName
 plotName = args.plotName
 
-del args
+model_name = "npcdn"
+modelPath  = os.path.join(inPath, expName, "models", model_name)
+foldPath   = os.path.join(inPath, expName, foldName)
 
-i = 1
+# ── Load folds ────────────────────────────────────────────────────────────────
+if not os.path.exists(foldPath):
+    print(f"[ERROR] Folds file not found: {foldPath}")
+    sys.exit(1)
 
-m = "dn"
+with open(foldPath, "rb") as fp:
+    folds = pickle.load(fp)
 
-fig = plt.figure(i, figsize=(12, 10))
-ax = fig.add_subplot(111)
+print(f"[INFO] Loaded {len(folds)} folds from {foldPath}")
 
-accMean = []
-accStd = []
-mccMean = []
-mccStd = []
-sensMean = []
-sensStd = []
-specMean = []
-specStd = []
-AUCMean = []
-AUCStd = []
-F1_ScoreMean = []
-F1_ScoreStd = []
+# ── Per-fold evaluation ───────────────────────────────────────────────────────
+custom_objects = {
+    "DualStreamCNN": DualStreamCNN,
+    "precision":     evaluator.precision,
+    "recall":        evaluator.recall,
+    "f1score":       evaluator.f1score,
+    "aucScore":      evaluator.aucScore,
+    "acc":           evaluator.acc,
+}
 
-evaluations = {
-        "Accuracy": [],
-        "Precision": [],
-        "TPR": [],
-        "FPR": [],
-        "AUC": [],
-        "Sensitivity": [],
-        "Specificity": [],
-        "MCC": [],
-        "F1_Score": []
-    }
-modelPath = os.path.join(inPath, expName,  "models", m)
-foldPath = os.path.join(inPath, expName)
+results = {k: [] for k in
+           ["Accuracy", "Precision", "Sensitivity", "Specificity",
+            "MCC", "AUC", "F1_Score"]}
 
-if(not os.path.exists(os.path.join(foldPath, foldName))):
-        print("Error: Folds not Found in {}".format(os.path.join(foldPath, foldName)))
-else:
-    with open(os.path.join(foldPath, foldName), "rb") as fp:
-        folds = pickle.load(fp)
-    i = 1
-    for fold in folds:
-        #Check if model alredy exists
-        if(os.path.exists(os.path.join(modelPath, "{}_bestModel-fold{}.hdf5".format(m, i)))):
+all_tpr = []
+all_fpr = []
 
-            # load json and create model
-            model = load_model(os.path.join(modelPath, "{}_bestModel-fold{}.hdf5".format(m, i)),
-                            custom_objects={"precision": evaluator.precision, "recall": evaluator.recall, "f1score": evaluator.f1score, "aucScore": evaluator.aucScore})
-            print(model.summary())
-        else:
-            print("Error: Model not Found")
-            break
+for fold_idx, fold in enumerate(folds, start=1):
+    model_file = os.path.join(modelPath, f"npcdn_best-fold{fold_idx}.keras")
 
-        y_pred = model.predict([fold["X1_test"], fold["X2_test"]])
-        label_pred = evaluator.pred2label(y_pred)
-        # Compute precision, recall, sensitivity, specifity, mcc
-        acc = accuracy_score(fold["y_test"], label_pred)
-        prec = precision_score(fold["y_test"], label_pred)
+    if not os.path.exists(model_file):
+        print(f"[ERROR] Model not found for fold {fold_idx}: {model_file}")
+        continue
 
-        conf = confusion_matrix(fold["y_test"], label_pred)
-        if(conf[0][0]+conf[1][0]):
-            sens = float(conf[0][0])/float(conf[0][0]+conf[1][0])
-        else:
-            sens = 0.0
-        if(conf[1][1]+conf[0][1]):
-            spec = float(conf[1][1])/float(conf[1][1]+conf[0][1])
-        else:
-            spec = 0.0
-        if((conf[0][0]+conf[0][1])*(conf[0][0]+conf[1][0])*(conf[1][1]+conf[0][1])*(conf[1][1]+conf[1][0])):
-            mcc = (float(conf[0][0])*float(conf[1][1]) - float(conf[1][0])*float(conf[0][1]))/math.sqrt((conf[0][0]+conf[0][1])*(conf[0][0]+conf[1][0])*(conf[1][1]+conf[0][1])*(conf[1][1]+conf[1][0]))
-        else:
-            mcc = 0.0
-        fpr, tpr, thresholds = roc_curve(fold["y_test"], y_pred)
-        auc = roc_auc_score(fold["y_test"], y_pred)
+    model = load_model(model_file, custom_objects=custom_objects)
 
-        f1score = f1_score(fold['y_test'], label_pred)
+    X_test = fold["X1_test"].astype("float32")
+    y_test = fold["y_test"].astype("float32").ravel()
 
-        evaluations["Accuracy"].append(acc)
-        evaluations["Precision"].append(prec)
-        evaluations["TPR"].append(tpr)
-        evaluations["FPR"].append(fpr)
-        evaluations["AUC"].append(auc)
-        evaluations["Sensitivity"].append(sens)
-        evaluations["Specificity"].append(spec)
-        evaluations["MCC"].append(mcc)
-        evaluations["F1_Score"].append(f1score)
+    # Raw probabilities and hard labels
+    y_prob  = model.predict(X_test, verbose=0).ravel()
+    y_pred  = np.round(np.clip(y_prob, 0, 1))
 
-        i = i + 1
+    # ── Metrics ──────────────────────────────────────────────────────────────
+    acc_  = accuracy_score(y_test, y_pred)
+    prec  = precision_score(y_test, y_pred, zero_division=0)
+    f1_   = f1_score(y_test, y_pred, zero_division=0)
+    auc_  = roc_auc_score(y_test, y_prob)
 
-    accMean.append(np.mean(evaluations["Accuracy"]))
-    accStd.append(np.std(evaluations["Accuracy"]))
-    mccMean.append(np.mean(evaluations["MCC"]))
-    mccStd.append(np.std(evaluations["MCC"]))
-    sensMean.append(np.mean(evaluations["Sensitivity"]))
-    sensStd.append(np.std(evaluations["Sensitivity"]))
-    specMean.append(np.mean(evaluations["Specificity"]))
-    specStd.append(np.std(evaluations["Specificity"]))
-    AUCMean.append(np.mean(evaluations["AUC"]))
-    AUCStd.append(np.std(evaluations["AUC"]))
-    F1_ScoreMean.append(np.mean(evaluations["F1_Score"]))
-    F1_ScoreStd.append(np.std(evaluations["F1_Score"]))
+    fpr_arr, tpr_arr, _ = roc_curve(y_test, y_prob)
+    all_fpr.append(fpr_arr)
+    all_tpr.append(tpr_arr)
 
+    cm   = confusion_matrix(y_test, y_pred)
+    TN, FP, FN, TP = cm.ravel()
 
-metricsMean = [accMean[0], sensMean[0], specMean[0], mccMean[0], AUCMean[0], F1_ScoreMean[0]]
-metricsStd = [accStd[0], sensStd[0], specStd[0], mccStd[0], AUCStd[0], F1_ScoreStd[0]]
-print(accStd)
-print(mccStd)
-print(sensStd)
-print(specStd)
-print(evaluations)
+    sens = float(TP) / float(TP + FN) if (TP + FN) > 0 else 0.0
+    spec = float(TN) / float(TN + FP) if (TN + FP) > 0 else 0.0
 
-x = range(len(metricsMean))
-labels = ["Accuracy", "Sensitivity", "Specificity", "MCC", "AUC", "F1_Score"]
-plt.bar(x, metricsMean, width=0.8, bottom=None)
-plt.title(plotName)
-ax.set_xticks(x)
-ax.set_xticklabels(labels)
-plt.ylim(0, 1.10)
-for i, v in enumerate(metricsMean):
-    ax.text(i-.40, v+.05, "{}+-{}".format(round(v,4),round(metricsStd[i],4)), color='blue', fontweight='bold')
+    denom = math.sqrt(float((TP+FP)*(TP+FN)*(TN+FP)*(TN+FN)))
+    mcc   = (float(TP*TN) - float(FP*FN)) / denom if denom > 0 else 0.0
 
+    results["Accuracy"].append(acc_)
+    results["Precision"].append(prec)
+    results["Sensitivity"].append(sens)
+    results["Specificity"].append(spec)
+    results["MCC"].append(mcc)
+    results["AUC"].append(auc_)
+    results["F1_Score"].append(f1_)
+
+    print(f"  Fold {fold_idx}: acc={acc_:.4f}  sens={sens:.4f}  spec={spec:.4f}  "
+          f"mcc={mcc:.4f}  auc={auc_:.4f}  f1={f1_:.4f}")
+
+# ── Aggregate stats ───────────────────────────────────────────────────────────
+metric_names = ["Accuracy", "Sensitivity", "Specificity", "MCC", "AUC", "F1_Score"]
+means = [np.mean(results[m]) for m in metric_names]
+stds  = [np.std(results[m])  for m in metric_names]
+
+print("\n[SUMMARY]")
+for name, mu, sigma in zip(metric_names, means, stds):
+    print(f"  {name:15s}: {mu:.4f} ± {sigma:.4f}")
+
+# ── Bar chart ─────────────────────────────────────────────────────────────────
 plot_dir = os.path.join(modelPath, "plot")
-if(not os.path.isdir(plot_dir)):
-    os.makedirs(plot_dir)
-fig.savefig(os.path.join(plot_dir, "{} Evaluations.png".format(plotName)), bbox_inches='tight')
-fig.savefig(os.path.join(plot_dir, "{} Evaluations.svg".format(plotName)), format="svg", bbox_inches='tight')
-fig.savefig(os.path.join(plot_dir, "{} Evaluations.eps".format(plotName)), format="eps", bbox_inches='tight')
+os.makedirs(plot_dir, exist_ok=True)
 
+fig, ax = plt.subplots(figsize=(12, 6))
+x = range(len(metric_names))
+ax.bar(x, means, width=0.6)
+ax.set_xticks(list(x))
+ax.set_xticklabels(metric_names)
+ax.set_ylim(0, 1.15)
+ax.set_title(f"{plotName} — 5-Fold Cross-Validation")
+ax.set_ylabel("Score")
 
+for i, (mu, sigma) in enumerate(zip(means, stds)):
+    ax.text(i - 0.30, mu + 0.03, f"{mu:.4f}\n±{sigma:.4f}",
+            color="blue", fontsize=8, fontweight="bold")
 
+for fmt in ("png", "svg", "eps"):
+    fig.savefig(os.path.join(plot_dir, f"{plotName}_eval.{fmt}"),
+                format=fmt, bbox_inches="tight")
+plt.close(fig)
+print(f"[INFO] Bar chart saved to {plot_dir}")
+
+# ── CSV ───────────────────────────────────────────────────────────────────────
+csv_path = os.path.join(modelPath, "evaluation_per_fold.csv")
+with open(csv_path, mode="w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["Fold"] + metric_names)
+    for idx in range(len(results["Accuracy"])):
+        writer.writerow(
+            [idx + 1] + [results[m][idx] for m in metric_names]
+        )
+    writer.writerow(
+        ["Mean"] + [np.mean(results[m]) for m in metric_names]
+    )
+    writer.writerow(
+        ["Std"]  + [np.std(results[m])  for m in metric_names]
+    )
+
+print(f"[INFO] Per-fold metrics saved to {csv_path}")

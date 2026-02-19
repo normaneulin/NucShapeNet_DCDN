@@ -1,129 +1,156 @@
+# training.py
+# Standard training for Dual-Stream CNN (no Co-DeepNet logic)
+
 import argparse
-import model_dn
-import evaluator
 import os
 import pickle
 import numpy as np
 import tensorflow as tf
-import pdb
+import model_npcdn
+import evaluator
 
-
-parser = argparse.ArgumentParser(description='Nucleosome Classification Experiment')
-parser.add_argument('-p', '--path', dest='path', type=str, default=r"D:\DeepNup\code_and_data\data\setting1\pickle_H",
-                    help='Pickle file Path')
-
-parser.add_argument('-ohn', '--ohnuc', dest='nuc_one_hot_Pickle', type=str, default="one_hot_nuc.pickle",
-                    help='Nucleosome filename')
-parser.add_argument('-ohl', '--ohlin', dest='link_one_hot_Pickle', type=str, default="one_hot_link.pickle",
-                    help='Linker filename')
-
-parser.add_argument('-pn', '--pnuc', dest='nuc_PseTNC_Pickle', type=str, default="PseTNC_nuc.pickle",
-                    help='Nucleosome filename')
-parser.add_argument('-pl', '--plin', dest='link_PseTNC_Pickle', type=str, default="PseTNC_link.pickle",
-                    help='Linker filename')
-
-parser.add_argument('-o', '--out', dest='outPath', type=str, default=r"D:\DeepNup\result",
-                    help='Output file Path')
-parser.add_argument('-e', '--experiments', dest='exp', default='Experiment_H',
-                    help='Experiments Name')
-parser.add_argument('-f', '-foldName', dest='foldName', default="folds.pickle",
-                    help='Folds Filename')
-
+parser = argparse.ArgumentParser()
+parser.add_argument("-p", "--path", dest="path", type=str,
+                    default="data/DatasetNup_1/encoded_melanogaster")
+parser.add_argument("-o", "--out",  dest="outPath", type=str, default="result")
+parser.add_argument("-e", "--experiments", dest="exp",
+                    default="Experiment_melanogaster")
+parser.add_argument("-f", "--foldName", dest="foldName", default="folds.pickle")
+parser.add_argument("-tmohn", "--tmohnuc",  dest="nuc_pickle",
+                    type=str, default="three_mer_one_hot_nuc.pickle")
+parser.add_argument("-tmohl", "--tmohlin",  dest="link_pickle",
+                    type=str, default="three_mer_one_hot_link.pickle")
 args = parser.parse_args()
-inPath = args.path
-nuc_one_hot = args.nuc_one_hot_Pickle
-link_one_hot = args.link_one_hot_Pickle
-nuc_PseTNC = args.nuc_PseTNC_Pickle
-link_PseTNC = args.link_PseTNC_Pickle
 
-outPath = args.outPath
-expName = args.exp
+inPath   = args.path
+outPath  = args.outPath
+expName  = args.exp
 foldName = args.foldName
 
-metricsList = [evaluator.acc, evaluator.precision, evaluator.recall, evaluator.f1score, evaluator.aucScore]
+# ══════════════════════════════════════════════════════════════════════════════
+# Hyper-parameters
+# ══════════════════════════════════════════════════════════════════════════════
+EPOCHS       = 200
+PATIENCE     = 20
+BATCH_SIZE   = 64
+LEARNING_RATE = 1e-3
+K_FOLDS      = 10
 
-epochs = 200
-batch_size = 64
-shuffle = False 
-seed = None  
+model_name = "npcdn"
+modelPath  = os.path.join(outPath, expName, "models", model_name)
+foldPath   = os.path.join(outPath, expName, foldName)
 
-# Number of the species for Roc Curve Figure
-fNum = 1
+os.makedirs(modelPath,                 exist_ok=True)
+os.makedirs(os.path.dirname(foldPath), exist_ok=True)
 
-if (os.path.exists(os.path.join(outPath, "elapsed.json"))):
-    os.path.join(outPath, "elapsed.json")
+print("[INFO] Loading encoded data...")
 
-m = "dn"
+for p in (os.path.join(inPath, args.nuc_pickle),
+          os.path.join(inPath, args.link_pickle)):
+    if not os.path.exists(p):
+        raise FileNotFoundError(f"Pickle not found: {p}")
 
-# Create and set model save dir
-modelPath = os.path.join(outPath, expName, "models", m)
-if (not os.path.isdir(modelPath)):
-    os.makedirs(modelPath)
+with open(os.path.join(inPath, args.nuc_pickle),  "rb") as fp:
+    nuc_tmoh  = pickle.load(fp)
+with open(os.path.join(inPath, args.link_pickle), "rb") as fp:
+    link_tmoh = pickle.load(fp)
 
-# Load nucleosome and linker and then create dataset and  class labels
-with open(os.path.join(inPath, nuc_one_hot), "rb") as fp:
-    nuc_one_hot_list = pickle.load(fp)
-with open(os.path.join(inPath, link_one_hot), "rb") as fp:
-    link_one_hot_list = pickle.load(fp)
+labels = np.concatenate([
+    np.ones( (len(nuc_tmoh),  1), dtype=np.float32),
+    np.zeros((len(link_tmoh), 1), dtype=np.float32),
+], axis=0)
 
-with open(os.path.join(inPath, nuc_PseTNC), "rb") as fp:
-    nuc_PseTNC_list = pickle.load(fp)
-with open(os.path.join(inPath, link_PseTNC), "rb") as fp:
-    link_PseTNC_list = pickle.load(fp)
+data = np.concatenate(
+    [np.array(nuc_tmoh), np.array(link_tmoh)], axis=0
+).astype(np.float32)
 
+print(f"[INFO] data.shape: {data.shape}  labels.shape: {labels.shape}")
 
-input_size = (147, 4)
-labels = np.concatenate(
-    (np.ones((len(nuc_one_hot_list), 1), dtype=np.float32), np.zeros((len(link_one_hot_list), 1), dtype=np.float32)),
-    axis=0)
-one_hot_feature = np.concatenate((nuc_one_hot_list, link_one_hot_list), 0)
-PseTNC_feature = np.concatenate((nuc_PseTNC_list, link_PseTNC_list), 0)
-
-data1 = one_hot_feature
-data2 = PseTNC_feature
-
-
-# Create folder to save fold dataset and build kfold
-foldPath = os.path.join(outPath, expName, foldName)
-folds = evaluator.build_kfold(data1, data2, labels, k=10, shuffle=shuffle, seed=seed)
-# pdb.set_trace()
+folds = evaluator.build_kfold(data, labels, k=K_FOLDS, shuffle=True, seed=42)
 with open(foldPath, "wb") as fp:
     pickle.dump(folds, fp)
+print(f"[INFO] {K_FOLDS}-fold splits saved")
 
 
-evaluations = {
-    "Accuracy": [],
-    "Precision": [],
-    "TPR": [],
-    "FPR": [],
-    "AUC": [],
-    "Sensitivity": [],
-    "Specificity": [],
-    "MCC": []
-}
+# ══════════════════════════════════════════════════════════════════════════════
+# Training
+# ══════════════════════════════════════════════════════════════════════════════
 
-i = 1
-for fold in folds:
-    
+def train_fold(fold_idx, fold):
+    print(f"\n{'='*70}")
+    print(f"  FOLD {fold_idx}  |  Dual-Stream CNN")
+    print(f"  max_epochs={EPOCHS}  patience={PATIENCE}  batch_size={BATCH_SIZE}")
+    print(f"{'='*70}")
+
     tf.keras.backend.clear_session()
-    modelCallbacks = [
-        tf.keras.callbacks.ModelCheckpoint(os.path.join(modelPath, "{}_bestModel-fold{}.hdf5".format(m, i)),
-                                           monitor='val_loss', verbose=0, save_best_only=True, save_weights_only=False,
-                                           mode='auto', period=1),
-        tf.keras.callbacks.EarlyStopping(monitor='val_loss', min_delta=0, patience=15, verbose=0, mode='auto',
-                                         baseline=None, restore_best_weights=False)
+
+    # Build model
+    model = model_npcdn.build_model(input_shape=(145, 12))
+
+    # Compile
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
+        loss=tf.keras.losses.BinaryCrossentropy(),
+        metrics=[
+            evaluator.acc,
+            evaluator.precision,
+            evaluator.recall,
+            evaluator.f1score,
+            evaluator.aucScore,
+        ]
+    )
+
+    X_train = fold["X1_train"].astype(np.float32)
+    y_train = fold["y_train"].astype(np.float32)
+    X_val   = fold["X1_test"].astype(np.float32)
+    y_val   = fold["y_test"].astype(np.float32)
+
+    # Callbacks
+    checkpoint_path = os.path.join(modelPath, f"npcdn_best-fold{fold_idx}.keras")
+    callbacks = [
+        tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=PATIENCE,
+            restore_best_weights=True,
+            verbose=1
+        ),
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath=checkpoint_path,
+            monitor='val_loss',
+            save_best_only=True,
+            verbose=1
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,
+            patience=5,
+            min_lr=1e-6,
+            verbose=1
+        )
     ]
-    model = model_dn.dn(metrics=metricsList)
-    print(model.summary())
-    print('#############fold'+str(i)+'################')
-    model.fit(x=[fold["X1_train"], fold['X2_train']], y=fold["y_train"],
-              batch_size=batch_size, epochs=epochs, verbose=1, callbacks=modelCallbacks, validation_split=0.05,
-              validation_freq=1)
 
-    i += 1
+    # Train
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        callbacks=callbacks,
+        verbose=1
+    )
 
-del model
+    print(f"\n[FOLD {fold_idx} DONE]  Best val_loss={min(history.history['val_loss']):.4f}")
+    print(f"  -> {checkpoint_path}")
+    
+    return history
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════════════════════════
 
+for fold_idx, fold in enumerate(folds, start=1):
+    train_fold(fold_idx, fold)
 
+print("\n[INFO] All folds complete.")
+print("Models saved to:", modelPath)
